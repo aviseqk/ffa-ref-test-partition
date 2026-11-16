@@ -1,0 +1,33 @@
+/*
+ * This file is a Partition Manifest (PM) for my minimal reference secure partition (SP)
+ *
+ */
+/dts-v1/;
+
+/ {
+	compatible = "arm,ffa-manifest-1.0";
+
+	/* Properties */
+	description = "FFA Reference Test SP";
+	ffa-version = <0x00010003>; /* 31:16 - Major, 15:0 - Minor */
+
+	uuid = <0x3f7950f2 0x7a0940e5 0xbd8368b9 0x4cbba07d>;
+
+	execution-ctx-count = <1>;
+	exception-level = <2>; /* S-EL1 */
+	execution-state = <0>; /* AARCH64 */
+
+	load-address = <0x7000000>;
+	entrypoint-offset = <0x00002000>;
+
+	xlat-granule = <0>; /* 4KiB */
+
+	boot-order = <0>;
+
+	messaging-method = <3>; /* Direct messaging only */
+
+	ns-interrupts-action = <0>; /* Queue NS interrupts */
+
+	/* Boot protocol */
+	gp-register-num = <0>;
+};

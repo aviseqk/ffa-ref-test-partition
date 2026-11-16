@@ -1,0 +1,14 @@
+{
+  "ffa-ref-test-sp": {
+    "image": {
+      "file": "../build/ffa-ref-test-sp.bin",
+      "offset": "0x2000"
+    },
+    "pm": {
+      "file": "sp_manifest.dts",
+      "offset": "0x1000"
+    },
+    "physical-load-address": "0x07000000",
+    "owner": "SiP"
+  }
+}
