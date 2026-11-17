@@ -23,6 +23,20 @@ SECTIONS
 
 	. = ALIGN(16);
 
+	.data :
+	{
+		*(.data)
+		*(.data.*)
+	}
+
+	.data.rel.ro :
+	{
+		*(.data.rel.ro)
+		*(.data.rel.ro.*)
+	}
+	
+	. = ALIGN(16);
+
 	.rodata : 
 	{
 		*(.rodata)

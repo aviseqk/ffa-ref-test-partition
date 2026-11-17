@@ -39,7 +39,7 @@ OBJS := \
     $(BUILD)/runtime.o \
     $(BUILD)/main.o
 
-.PHONY: all clean inspect
+.PHONY: all clean inspect rebuild
 
 all: $(BUILD)/ffa-ref-test-sp.bin
 
@@ -75,3 +75,6 @@ inspect: $(BUILD)/ffa-ref-test-sp.elf
 
 clean:
 	rm -rf $(BUILD)
+
+rebuild: clean
+	$(MAKE) all
