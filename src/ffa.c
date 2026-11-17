@@ -1,5 +1,7 @@
 #include "ffa/ffa_abi.h"
 
+static uint32_t negotiated_version;
+
 /* NOTE: this is a SMC call, but written in C with inline assembly approach,
  * there is also a pure assembly wrapper written for the same purpose, in `src/ffa_smc.S` 
  * which does not have to consider a lot of compiler adjustements about different registers
@@ -36,16 +38,28 @@ void ffa_smc(struct ffa_regs *regs)
 	regs->x[7] = x7;
 }
 
+// TODO: implement 64-bit interface of FFA_CONSOLE_LOG
 bool ffa_console_log_available(void)
 {
-	struct ffa_regs regs = {0};
+	if (!negotiated_version)
+		return false;
 
-	regs.x[0] = FFA_FEATURES_32;
-	regs.x[1] = FFA_CONSOLE_LOG_32;
+	return ffa_function_supported(FFA_FID_CONSOLE_LOG_32);
+}
 
-	ffa_smc(&regs);
+/* check whether FF-A interface returned FFA_SUCCESS or FFA_ERROR 
+ * */
+static int ffa_check_success(struct ffa_regs *regs)
+{
+	uint32_t function_id = (uint32_t)regs->x[0];
 
-	return regs.x[0] == FFA_SUCCESS_32;
+	// if it was FFA_ERROR, it returns error code in x2
+	if (function_id == FFA_FID_ERROR)
+		return (int32_t)(uint32_t)regs->x[2];
+	if (function_id != FFA_FID_SUCCESS)
+		return FFA_LOCAL_ERR_BAD_RETURN;
+
+	return 0;
 }
 
 /*
@@ -56,11 +70,14 @@ bool ffa_console_log_available(void)
 // TODO: FFA v1.2 supports CONSOLE_LOG_64 that allows 128 characters per call, ADD THAT LATER
 bool ffa_console_puts(const char *str)
 {
+	if (!negotiated_version || !str)
+		return false;
+
 	while (*str != '\0') {
 		struct ffa_regs regs = {0};
 		size_t count = 0;
 
-		regs.x[0] = FFA_CONSOLE_LOG_32;
+		regs.x[0] = FFA_FID_CONSOLE_LOG_32;
 
 		while (count < 24 && str[count] != '\0') {
 
@@ -74,31 +91,96 @@ bool ffa_console_puts(const char *str)
 
 		regs.x[1] = count;
 
-		ffa_smc(&regs);
+		ffa_smc_call(&regs);
 
-		if (regs.x[0] != FFA_SUCCESS_32)
+		if (ffa_check_success(&regs) != 0)
 			return false;
 
 		str += count;
 	}
 	return true;
-
 }
 
 int ffa_get_id(uint16_t *id)
 {
 	struct ffa_regs regs = {0};
 
-	regs.x[0] = FFA_ID_GET_32;
+	if (!negotiated_version)
+		return FFA_LOCAL_ERR_NOT_INITIALIZED;
+
+	regs.x[0] = FFA_FID_ID_GET;
 
 	ffa_smc_call(&regs);
 
-	if ((uint32_t)regs.x[0] != FFA_SUCCESS_32) {
+	int ret = ffa_check_success(&regs);
+	if (ret) {
 		ffa_console_puts("[SP] FFA_ID_GET failed.\r\n");
-		return -1;
+		return ret;
 	}
 
 	*id = (uint16_t)regs.x[2];
 
 	return 0;
+}
+
+
+
+int ffa_init(uint32_t requested_version)
+{
+	struct ffa_regs regs = {0};
+	
+	if (FFA_VERSION_MAJOR(requested_version) != 1)
+		return FFA_LOCAL_ERR_BAD_VERSION;
+
+	regs.x[0] = FFA_FID_VERSION;
+	regs.x[1] = requested_version;
+
+	ffa_smc_call(&regs);
+
+	int32_t result = (int32_t)(uint32_t)regs.x[0];
+
+	// FFA_VERSION SMC call returns error code directly in the x0 register
+	if (result < 0)
+		return result;
+
+	uint32_t remote_version = (uint32_t)result;
+
+	if (FFA_VERSION_MAJOR(requested_version) != FFA_VERSION_MAJOR(remote_version))
+		return FFA_LOCAL_ERR_BAD_VERSION;
+
+	negotiated_version = remote_version < requested_version ? remote_version : requested_version;
+	
+	return 0;
+}
+
+/* to query whether a specific FF-A function is implemented at this FF-A instance */
+int ffa_features(uint32_t fid, uint32_t input_properties,
+		uint32_t *props_1, uint32_t *props_2)
+{
+	struct ffa_regs regs = {0};
+
+	if (!negotiated_version)
+		return FFA_LOCAL_ERR_NOT_INITIALIZED;
+
+	regs.x[0] = FFA_FID_FEATURES;
+	regs.x[1] = fid;
+	regs.x[2] = input_properties;
+
+	ffa_smc_call(&regs);
+
+	int ret = ffa_check_success(&regs);
+
+	if (ret)
+		return ret;
+
+	if (props_1)
+		*props_1 = (uint32_t)regs.x[2];
+	if (props_2)
+		*props_2 = (uint32_t)regs.x[3];
+	return 0;
+}
+
+bool ffa_function_supported(uint32_t function_id)
+{
+	return ffa_features(function_id, 0, NULL, NULL) == 0;
 }

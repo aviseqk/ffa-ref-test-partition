@@ -27,14 +27,72 @@
 #define SP_STATUS_BAD_OPCODE     5
 #define SP_STATUS_BAD_RESERVED   6
 
+
+/* INFO: RELOCATION CODE Issue: refer to `notes/relocation-bug-using-abs-pointers-in-sp.md` for note
+ * on the problem with using pointers to string literals for ffa_function names*/
+struct ffa_function {
+	const char name[32];
+	uint32_t fid;
+	//bool need_input_prop;
+};
+
+#define ARRAY_SIZE(arr)		(sizeof(arr) / sizeof((arr)[0]))
+
+static const struct ffa_function functions_to_check[] = {
+	{"FFA_CONSOLE_LOG_32", FFA_FID_CONSOLE_LOG_32},
+	{"FFA_CONSOLE_LOG_64", FFA_FID_CONSOLE_LOG_64},
+	{"FFA_DIRECT_REQ2", FFA_FID_MSG_SEND_DIRECT_REQ2_64},
+	{"FFA_DIRECT_RESP2", FFA_FID_MSG_SEND_DIRECT_RESP2_64},
+	{"FFA_DIRECT_REQ", FFA_FID_MSG_SEND_DIRECT_REQ_32},
+	{"FFA_DIRECT_RESP", FFA_FID_MSG_SEND_DIRECT_RESP_32},
+	{"FFA_RXTX_MAP_32", FFA_FID_RXTX_MAP_32},
+	{"FFA_RXTX_MAP_64", FFA_FID_RXTX_MAP_64},
+	{"FFA_MSG_SEND2", FFA_FID_MSG_SEND2},
+	{"FFA_NOTIFICATION_BIND", FFA_FID_NOTIFICATION_BIND},
+	{"FFA_NOTIFICATION_SET", FFA_FID_NOTIFICATION_SET},
+	{"FFA_NOTIFICATION_GET", FFA_FID_NOTIFICATION_GET},
+	//{"FFA_MEM_RETRIEVE_REQ2", FFA_FID_MEM_RETRIEVE_REQ_64},
+};
+
+static void report_ffa_function(const char *name, uint32_t fid)
+{
+	ffa_console_puts(name);
+	
+	if (ffa_function_supported(fid))
+		ffa_console_puts(": supported\n");
+	else
+		ffa_console_puts(": NOT supported\n");
+}
+
+/* making SP report all the available FFA capabilites, post FFA_FEATURES call */
+static void report_all_ffa_functions_check(const struct ffa_function *functions, size_t count)
+{
+	ffa_console_puts("\r\n[SP] FF-A capabilities Report\r\n");
+
+	for (size_t i = 0; i < count; i++) {
+		report_ffa_function(
+				functions[i].name,
+				functions[i].fid);
+	}
+
+	// NOTE: this feature checked differently as it needs input props in FFA_FEATURES call
+	ffa_console_puts("FFA_FID_MEM_RETRIEVE_REQ_64");
+	
+	int ret = ffa_features(FFA_FID_MEM_RETRIEVE_REQ_64, 0x2, NULL, NULL);
+	if (ret == 0)
+		ffa_console_puts(": supported\n");
+	else
+		ffa_console_puts(": NOT supported\n");
+}
+
 static void prepare_msg_wait(struct ffa_regs *regs)
 {
 	unsigned int i;
 
-	for (i = 0; i < 8; i++)
+	for (i = 0; i < FFA_REG_COUNT; i++)
 		regs->x[i] = 0;
 
-	regs->x[0] = FFA_MSG_WAIT_32;
+	regs->x[0] = FFA_FID_MSG_WAIT;
 }
 
 static void wait_forever(void)
@@ -126,7 +184,7 @@ static void prepare_direct_response(struct ffa_regs *regs,
 		status = SP_STATUS_BAD_RESERVED;
 
 	
-	regs->x[0] = FFA_MSG_SEND_DIRECT_RESP_32;
+	regs->x[0] = FFA_FID_MSG_SEND_DIRECT_RESP_32;
 	
 	regs->x[1] = ((uint32_t)my_id << 16) | (uint32_t)sender_id;
 	regs->x[2] = 0;
@@ -139,6 +197,15 @@ static void prepare_direct_response(struct ffa_regs *regs,
 
 void sp_main(void)
 {
+	uint16_t my_id = 0;
+	struct ffa_regs regs = {0};
+
+	// NOTE: FF-A v1.2 requested because minimum requirement for Virtio-msg later
+	int ret = ffa_init(FFA_VERSION_1_2);
+
+	if (ret != 0)
+		wait_forever();
+
 	if (!ffa_console_log_available())
 		wait_forever();
 
@@ -150,11 +217,8 @@ void sp_main(void)
 			"\r\n"
 	);
 
-	ffa_console_puts("[SP] Executing C code at S-EL1\r\n");
+	ffa_console_puts("[SP] FF-A version: 1.2 requested\r\n");
 	
-	uint16_t my_id = 0;
-	struct ffa_regs regs = {0};
-
 	if (ffa_get_id(&my_id) != 0) {
 		ffa_console_puts("[SP] FFA_ID_GET failed\n");
 		wait_forever();
@@ -168,12 +232,15 @@ void sp_main(void)
 		wait_forever();
 	}
 	
+	report_all_ffa_functions_check(functions_to_check,
+			ARRAY_SIZE(functions_to_check));
+
 	ffa_console_puts(
 			"[SP] Initialization complete \r\n"
 			"[SP] Calling FFA_MSG_WAIT\r\n"
 	);
 
-	/* FFA_MSG_WAIT_32 FFA call from SP allows Hafnium to resume its scheduling to 
+	/* FFA_MSG_WAIT FFA call from SP allows Hafnium to resume its scheduling to 
 	 * schedule other tasks or return control to Normal World
 	 * * if MSG_WAIT returns, meaning the same SP has been resumed by SPMC 
 	 * */
@@ -184,16 +251,16 @@ void sp_main(void)
 		ffa_smc_call(&regs);
 
 		switch((uint32_t)regs.x[0]) {
-			case FFA_MSG_SEND_DIRECT_REQ_32:
+			case FFA_FID_MSG_SEND_DIRECT_REQ_32:
 				ffa_console_puts("[SP] Direct Request Message Received\n");
 				prepare_direct_response(&regs, my_id);
 				continue;
 
-			case FFA_SUCCESS_32:
+			case FFA_FID_SUCCESS:
 				prepare_msg_wait(&regs);
 				continue;
 
-			case FFA_ERROR_32:
+			case FFA_FID_ERROR:
 				prepare_msg_wait(&regs);
 				continue;
 
