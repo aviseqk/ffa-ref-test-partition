@@ -44,7 +44,7 @@ bool ffa_console_log_available(void)
 	if (!negotiated_version)
 		return false;
 
-	return ffa_function_supported(FFA_FID_CONSOLE_LOG_32);
+	return ffa_function_supported(FFA_FID_CONSOLE_LOG_64);
 }
 
 /* check whether FF-A interface returned FFA_SUCCESS or FFA_ERROR 
@@ -67,8 +67,7 @@ static int ffa_check_success(struct ffa_regs *regs)
  * and 6 32-bit character registers i.e. w2-w7 for a FFA call
  * meaning, 24 characters per call, at max.
  * */
-// TODO: FFA v1.2 supports CONSOLE_LOG_64 that allows 128 characters per call, ADD THAT LATER
-bool ffa_console_puts(const char *str)
+bool ffa_console_puts_32(const char *str)
 {
 	if (!negotiated_version || !str)
 		return false;
@@ -86,6 +85,46 @@ bool ffa_console_puts(const char *str)
 			
 			regs.x[reg] |= (uint64_t)(uint8_t)str[count] << shift;
 
+			count++;
+		}
+
+		regs.x[1] = count;
+
+		ffa_smc_call(&regs);
+
+		if (ffa_check_success(&regs) != 0)
+			return false;
+
+		str += count;
+	}
+	return true;
+}
+
+/*
+ * FFA v1.2 supports FFA_CONSOLE_LOG_64,
+ * which uses x1 as character count,
+ * and 16 64-bit character registers i.e. x2-x17 for a FFA call
+ * meaning, 128 characters per call, at max.
+ * */
+bool ffa_console_puts(const char *str)
+{
+	if (!negotiated_version || !str)
+		return false;
+	
+	size_t pos = 0;
+
+	while (str[pos] != '\0') {
+		struct ffa_regs regs = {0};
+		size_t count = 0;
+
+		regs.x[0] = FFA_FID_CONSOLE_LOG_64;
+
+		while (count < 128 && str[pos + count] != '\0') {
+			uint64_t value = (uint8_t)str[pos+count];
+			unsigned int reg = 2 + count / 8;
+			unsigned int shift = (count % 8) * 8;
+			
+			regs.x[reg] |= value << shift;
 			count++;
 		}
 

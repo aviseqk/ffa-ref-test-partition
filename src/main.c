@@ -217,6 +217,8 @@ void sp_main(void)
 			"\r\n"
 	);
 
+	ffa_console_puts_32("\r\n[SP] logged via 32 bit interface\r\n");
+
 	ffa_console_puts("[SP] FF-A version: 1.2 requested\r\n");
 	
 	if (ffa_get_id(&my_id) != 0) {
@@ -270,5 +272,4 @@ void sp_main(void)
 				continue;
 		}
 	}
-
 }

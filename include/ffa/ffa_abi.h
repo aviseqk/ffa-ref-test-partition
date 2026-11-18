@@ -155,6 +155,7 @@ int ffa_get_id(uint16_t *id);
 bool ffa_console_log_available(void);
 
 bool ffa_console_puts(const char *str);
+bool ffa_console_puts_32(const char *str);
 
 int ffa_init(uint32_t requested_version);
 
