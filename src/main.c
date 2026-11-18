@@ -2,20 +2,26 @@
 #include <stdint.h>
 
 /* iur SP endpoint ID */
-#define SP_ENDPOINT_ID       0x8001
+#define SP_ENDPOINT_ID		0x8001
 
 /* Linux normal-world endpoint ID. */
-#define LINUX_ENDPOINT_ID    0x0000
+#define LINUX_ENDPOINT_ID	0x0000
 
-/* Application protocol. */
-#define REQUEST_MAGIC        UINT32_C(0x4c4e5831) /* LNX1 */
-#define RESPONSE_MAGIC       UINT32_C(0x53505231) /* SPR1 */
+/* Application protocol. - for 32 bit Direct Messaging */
+#define REQUEST_MAGIC		UINT32_C(0x4c4e5831) /* LNX1 */
+#define RESPONSE_MAGIC		UINT32_C(0x53505231) /* SPR1 */
 
 #define OPCODE_XOR		UINT32_C(1)
-#define REQUEST_NONCE        UINT32_C(0x1234abcd)
-#define REQUEST_VALUE        UINT32_C(0x11223344)
-#define XOR_MASK             UINT32_C(0xa5a5a5a5)
-#define RESPONSE_TRAILER     UINT32_C(0x53504f4e) /* SPON */
+#define REQUEST_NONCE		UINT32_C(0x1234abcd)
+#define XOR_MASK		UINT32_C(0xa5a5a5a5)
+#define RESPONSE_TRAILER	UINT32_C(0x53504f4e) /* SPON */
+
+/* Application protocol. - for 32 bit Direct Messaging v2 */
+#define REQUEST_MAGIC_v2	UINT32_C(0x4c4e5832) /* LNX2 */
+#define RESPONSE_MAGIC_v2	UINT32_C(0x53505232) /* SPR2 */
+#define XOR_MASK_v2		UINT64_C(0xa5a5a5a5a5a5a5a5)
+#define REQUEST_NONCE_v2	UINT32_C(0x1234abcd)
+#define RESPONSE_TRAILER_v2	UINT32_C(0x53504f4e) /* SPON */
 
 /* Protocol response status codes. */
 
@@ -131,7 +137,60 @@ static void print_hex16(uint16_t value)
 	(void)ffa_console_puts(output);
 }
 
-/* Check the incoming request and generate a response 
+/*
+static void print_hex32(uint32_t value)
+{
+	static const char hex[] = "0123456789abcdef";
+
+	char buffer[12];
+
+	buffer[0] = '0';
+	buffer[1] = 'x';
+
+	for (unsigned int i = 0; i < 8; i++) {
+		const unsigned int shift = (7 - i) * 4;
+		buffer[2 + i] = hex[(value >> shift) & 0xf];
+	}
+
+	buffer[10] = '\r';
+	buffer[11] = '\n';
+
+	char output[13];
+
+	for (unsigned int i = 0; i < 12; i++) {
+		output[i] = buffer[i];
+	}
+
+
+	output[12] = '\0';
+
+	(void)ffa_console_puts(output);
+}
+*/
+
+static void print_hex64(uint64_t value)
+{
+	static const char hex[] = "0123456789abcdef";
+
+	char output[22];
+
+	output[0] = '0';
+	output[1] = 'x';
+
+	for (unsigned int i = 0; i < 16; i++) {
+		const unsigned int shift = (15 - i) * 4;
+		output[2 + i] = hex[(value >> shift) & 0xf];
+	}
+
+	output[18] = '\r';
+	output[19] = '\n';
+	output[20] = '\0';
+
+	(void)ffa_console_puts(output);
+}
+
+
+/* Check the incoming request and generate a response for `Direct Messaging`
  *
  * Register arrangments as per ABI:
  *
@@ -195,6 +254,78 @@ static void prepare_direct_response(struct ffa_regs *regs,
 	regs->x[7] = RESPONSE_TRAILER;
 }
 
+/* Check the incoming request and generate a response for `Direct Messaging v2`
+ *
+ * Register arrangments as per ABI:
+ *
+ * Request:
+ *
+ * x0 = FFA_MSG_SEND_DIRECT_REQ2_64
+ * x1 = IDs combination of sender and receiver [sender_id << 16 | receiver_id]
+ * x2 = Destination partition UUID - lower 64 bits
+ * x3 = Destination partition UUID - higher 64 bits
+ * x4 - x17 = application request payload - 14 registers [a small application level protocol defined for testing
+ *	a service that SP provides of XORing a input request value, more detail in note]
+ *
+ * Response:
+ *
+ * x0 = FFA_MSG_SEND_DIRECT_RESP2_64
+ * x1 = IDs combination of sender and receiver [responder_id << 16 | sender_id]
+ * x2,x3 = reserved
+ * x4 - x17 = response payload */
+static void prepare_direct2_response(struct ffa_regs *regs,
+		uint16_t my_id)
+{
+	uint32_t packed_ids;
+	uint16_t sender_id, receiver_id;
+	uint64_t uuid_lo, uuid_hi;
+	uint32_t magic, opcode, seq_no;
+	uint32_t status = SP_STATUS_OK;
+
+	packed_ids = (uint32_t)regs->x[1];
+	sender_id = (uint16_t)(packed_ids >> 16);
+	receiver_id = (uint16_t)(packed_ids & 0xffff);
+
+	uuid_lo = regs->x[2];
+	uuid_hi = regs->x[3];
+	magic = regs->x[4];
+	opcode = regs->x[5];
+	seq_no = regs->x[6];
+
+	ffa_console_puts("[SP] Destination Partition UUID in the request payload: \r\n");
+	print_hex64(uuid_hi);
+	print_hex64(uuid_lo);
+
+	if (sender_id != LINUX_ENDPOINT_ID)
+		status = SP_STATUS_BAD_SENDER;
+	else if (receiver_id != my_id)
+		status = SP_STATUS_BAD_RECEIVER;
+	else if (magic != REQUEST_MAGIC_v2)
+		status = SP_STATUS_BAD_MAGIC;
+	else if (opcode != OPCODE_XOR)
+		status = SP_STATUS_BAD_OPCODE;
+
+	regs->x[0] = FFA_FID_MSG_SEND_DIRECT_RESP2_64;
+
+	regs->x[1] = (uint32_t)(my_id << 16) | (uint32_t)sender_id;
+	regs->x[2] = 0;
+	regs->x[3] = 0;
+	regs->x[4] = RESPONSE_MAGIC_v2;
+	regs->x[5] = status;
+	regs->x[6] = seq_no;
+
+	for (int i = 0; i < 11; i++) {
+		uint64_t input, output;
+		input = (uint64_t)regs->x[i+7];
+		output = input ^ XOR_MASK_v2;
+
+		regs->x[i + 7] = output;
+	}
+
+	(void)uuid_lo;
+	(void)uuid_hi;
+}
+
 void sp_main(void)
 {
 	uint16_t my_id = 0;
@@ -256,6 +387,11 @@ void sp_main(void)
 			case FFA_FID_MSG_SEND_DIRECT_REQ_32:
 				ffa_console_puts("[SP] Direct Request Message Received\n");
 				prepare_direct_response(&regs, my_id);
+				continue;
+
+			case FFA_FID_MSG_SEND_DIRECT_REQ2_64:
+				ffa_console_puts("[SP] Direct Request v2 Message Received\n");
+				prepare_direct2_response(&regs, my_id);
 				continue;
 
 			case FFA_FID_SUCCESS:

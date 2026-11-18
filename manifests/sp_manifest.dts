@@ -24,7 +24,7 @@
 
 	boot-order = <0>;
 
-	messaging-method = <3>; /* Direct messaging only */
+	messaging-method = <0x203>; /* Direct messaging via DIRECT_REQ and DIRECT_REQ2 only */
 
 	ns-interrupts-action = <0>; /* Queue NS interrupts */
 
