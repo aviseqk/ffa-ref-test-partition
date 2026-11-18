@@ -7,6 +7,10 @@
 /* Linux normal-world endpoint ID. */
 #define LINUX_ENDPOINT_ID	0x0000
 
+/* our SP's UUID */
+#define SP_UUID_LO		UINT64_C(0x7a0940e53f7950f2)
+#define SP_UUID_HI		UINT64_C(0x4cbba07dbd8368b9)
+
 /* Application protocol. - for 32 bit Direct Messaging */
 #define REQUEST_MAGIC		UINT32_C(0x4c4e5831) /* LNX1 */
 #define RESPONSE_MAGIC		UINT32_C(0x53505231) /* SPR1 */
@@ -25,13 +29,14 @@
 
 /* Protocol response status codes. */
 
-#define SP_STATUS_OK             0
-#define SP_STATUS_BAD_SENDER     1
-#define SP_STATUS_BAD_RECEIVER   2
-#define SP_STATUS_BAD_FLAGS      3
-#define SP_STATUS_BAD_MAGIC      4
-#define SP_STATUS_BAD_OPCODE     5
-#define SP_STATUS_BAD_RESERVED   6
+#define SP_STATUS_OK		0
+#define SP_STATUS_BAD_SENDER	1
+#define SP_STATUS_BAD_RECEIVER	2
+#define SP_STATUS_BAD_FLAGS	3
+#define SP_STATUS_BAD_MAGIC	4
+#define SP_STATUS_BAD_OPCODE    5
+#define SP_STATUS_BAD_RESERVED  6
+#define SP_STATUS_WRONG_UUID	7
 
 
 /* INFO: RELOCATION CODE Issue: refer to `notes/relocation-bug-using-abs-pointers-in-sp.md` for note
@@ -292,9 +297,12 @@ static void prepare_direct2_response(struct ffa_regs *regs,
 	opcode = regs->x[5];
 	seq_no = regs->x[6];
 
-	ffa_console_puts("[SP] Destination Partition UUID in the request payload: \r\n");
-	print_hex64(uuid_hi);
-	print_hex64(uuid_lo);
+	if (uuid_lo != SP_UUID_LO || uuid_hi != SP_UUID_HI) {
+		ffa_console_puts("[SP] Destination Partition UUID as advertised in the request: \r\n");
+		print_hex64(uuid_hi);
+		print_hex64(uuid_lo);
+		status = SP_STATUS_WRONG_UUID;
+	}
 
 	if (sender_id != LINUX_ENDPOINT_ID)
 		status = SP_STATUS_BAD_SENDER;
@@ -307,7 +315,8 @@ static void prepare_direct2_response(struct ffa_regs *regs,
 
 	regs->x[0] = FFA_FID_MSG_SEND_DIRECT_RESP2_64;
 
-	regs->x[1] = (uint32_t)(my_id << 16) | (uint32_t)sender_id;
+	uint32_t response_ids = ((uint32_t)my_id << 16) | (uint32_t)sender_id;
+	regs->x[1] = response_ids;
 	regs->x[2] = 0;
 	regs->x[3] = 0;
 	regs->x[4] = RESPONSE_MAGIC_v2;
