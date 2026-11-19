@@ -122,8 +122,10 @@
 #define FFA_RET_NOT_READY		(-10)
 
 /* FFA_RXTX_MAP function properties */
+#define FFA_RXTX_PAGE_SIZE		4096U
 #define FFA_RXTX_MIN_SZ_MASK		UINT32_C(0x3)
 #define FFA_RXTX_MAX_PAGES_MASK		UINT32_C(0xffff0000)
+#define FFA_RXTX_MAX_PAGES_SHIFT	16
 
 #define FFA_RXTX_MIN_SZ_4K		0x0
 #define FFA_RXTX_MIN_SZ_64K		0x1
@@ -164,5 +166,6 @@ int ffa_features(uint32_t fid, uint32_t input_properties,
 
 bool ffa_function_supported(uint32_t function_id);
 
+int ffa_rxtx_get_limits(uint32_t *min_size, uint32_t* max_size);
 
 #endif

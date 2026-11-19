@@ -223,3 +223,39 @@ bool ffa_function_supported(uint32_t function_id)
 {
 	return ffa_features(function_id, 0, NULL, NULL) == 0;
 }
+
+int ffa_rxtx_get_limits(uint32_t *min_size, uint32_t *max_size)
+{
+	int ret;
+	uint32_t buffer_props, min_encoding, max_pages;
+
+	if (!min_size || !max_size)
+		return FFA_LOCAL_ERR_BAD_RETURN;
+
+	ret = ffa_features(FFA_FID_RXTX_MAP_64, 0 ,&buffer_props, NULL);
+	if (ret)
+		return ret;
+
+	min_encoding = (buffer_props & FFA_RXTX_MIN_SZ_MASK);
+	switch (min_encoding) {
+	case FFA_RXTX_MIN_SZ_4K:
+		*min_size = 4 * 1024;
+		break;
+	case FFA_RXTX_MIN_SZ_16K:
+		*min_size = 16 * 1024;
+		break;
+	case FFA_RXTX_MIN_SZ_64K:
+		*min_size = 64 * 1024;
+		break;
+	default:
+		return FFA_LOCAL_ERR_BAD_RETURN;
+	}
+	
+	max_pages = (buffer_props & FFA_RXTX_MAX_PAGES_MASK) >> FFA_RXTX_MAX_PAGES_SHIFT;
+	if (max_pages)
+		*max_size = max_pages * FFA_RXTX_PAGE_SIZE;
+	else
+		*max_size = 0;
+	
+	return 0;
+}

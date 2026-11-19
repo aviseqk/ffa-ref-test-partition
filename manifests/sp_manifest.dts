@@ -24,10 +24,41 @@
 
 	boot-order = <0>;
 
-	messaging-method = <0x203>; /* Direct messaging via DIRECT_REQ and DIRECT_REQ2 only */
+	messaging-method = <0x207>; /* Direct messaging via DIRECT_REQ and DIRECT_REQ2 and Indirect Messaging */
+	
+	/* needed for receiving framework notifications about Rx_Tx buffer msg receipt */
+	notification-support;
 
 	ns-interrupts-action = <0>; /* Queue NS interrupts */
 
 	/* Boot protocol */
 	gp-register-num = <0>;
+
+	rx-tx-buffer {
+		compatible = "arm,ffa-manifest-rx_tx-buffer";
+		rx-buffer = <&rxbuf>;
+		tx-buffer = <&txbuf>;
+	};
+	
+	/* TODO: explore how to decide the physical base-address for Rx/Tx buffers */
+	memory-regions {
+		compatible = "arm,ffa-manifest-memory-regions";
+
+		rxbuf: rx-buffer {
+			compatible = "arm,ffa-manifest-memory-regions";
+			description = "SP rx-buffer";
+			pages-count = <1>;
+			attributes = <0x1>; /* read-only for Rx buffer */
+			base-address = <0x00000000 0x7700000>;
+		};
+
+		txbuf: tx-buffer {
+			compatible = "arm,ffa-manifest-memory-regions";
+			description = "SP tx-buffer";
+			pages-count = <1>;
+			attributes = <0x3>; /* read-write for Tx buffer */
+			base-address = <0x00000000 0x7701000>;
+		};
+
+	};
 };
