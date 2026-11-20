@@ -34,7 +34,7 @@
 	/* Boot protocol */
 	gp-register-num = <0>;
 
-	rx-tx-buffer {
+	rx_tx-info{
 		compatible = "arm,ffa-manifest-rx_tx-buffer";
 		rx-buffer = <&rxbuf>;
 		tx-buffer = <&txbuf>;
