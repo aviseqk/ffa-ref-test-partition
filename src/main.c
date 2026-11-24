@@ -418,3 +418,13 @@ void sp_main(void)
 		}
 	}
 }
+/* Last Virtual Interrupt handled by the SP */
+volatile uint32_t sp_last_irq_id = HF_INVALID_INTID;
+
+void sp_irq_handler(void)
+{
+	// retrieve and acknowledge this pending virtual interrupt using the 
+	// hafnium's hvc interface `HF_INTERRUPT_GET`
+	sp_last_irq_id = hf_interrupt_get();
+}
+

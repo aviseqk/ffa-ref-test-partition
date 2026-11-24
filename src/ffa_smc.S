@@ -64,3 +64,33 @@ ffa_smc_call:
 	ret
 
 .size ffa_smc_call, . - ffa_smc_call
+
+.section .text.hf_hvc, "ax"
+.align 4
+
+.globl hf_interrupt_get
+.type hf_interrupt_get, %function
+
+/*
+ * uint32_t hf_interrupt_get(void);
+ *
+ * Hafnium paravirtualized ABI:
+ *   x0 = HF_INTERRUPT_GET (0xff04)
+ *
+ * Returns: x0 = pending virtual interrupt ID
+ *        HF_INVALID_INTID if none is pending.
+ *
+ * This is an HVC, not an SMC.
+ * Hafnium's HF_INTERRUPT_GET returns the next pending virtual interrupt ID 
+ * and acknowledges it, marking it as no longer pending
+ */
+hf_interrupt_get:
+	stp x29, x30, [sp, #-16]!
+
+	movz x0, #0xff04
+	hvc #0
+
+	ldp x29, x30, [sp], #16
+	ret
+
+.size hf_interrupt_get, . - hf_interrupt_get
