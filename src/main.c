@@ -19,6 +19,9 @@ const uint8_t SP_UUID_BYTES[16] = {
 #define SP_UUID_LO		UINT64_C(0x7a0940e53f7950f2)
 #define SP_UUID_HI		UINT64_C(0x4cbba07dbd8368b9)
 
+/* NPI ID as discovered through FFA_FEATURES at startup. */
+static uint32_t sp_npi_intid = HF_INVALID_INTID;
+
 /* Last Virtual Interrupt handled by the SP */
 volatile uint32_t sp_last_irq_id = HF_INVALID_INTID;
 
@@ -126,6 +129,58 @@ static void report_all_ffa_functions_check(const struct ffa_function *functions,
 	}
 	else
 		ffa_console_puts(": NOT supported\n");
+}
+
+#define NOTIF_LINUX_TO_SP_ID		19U
+#define NOTIF_SP_TO_LINUX_ID		20U
+#define LINUX_TO_SP_NOTIF_BIT		(UINT64_C(1) << NOTIF_LINUX_TO_SP_ID)
+
+static void report_notifications_features(
+		const struct ffa_notifications_capabilities *caps)
+{
+	ffa_console_puts("[SP] Notification Feature Capability Report\r\n");
+	ffa_console_puts("[SP] FFA_NOTIFICATION_BIND: ");
+	print_hex32((uint32_t)caps->bind_status);
+	ffa_console_puts("[SP] FFA_NOTIFICATION_UNBIND: ");
+	print_hex32((uint32_t)caps->unbind_status);
+	ffa_console_puts("[SP] FFA_NOTIFICATION_GET: ");
+	print_hex32((uint32_t)caps->get_status);
+	ffa_console_puts("[SP] FFA_NOTIFICATION_SET: ");
+	print_hex32((uint32_t)caps->set_status);
+
+	ffa_console_puts("[SP] NPI Feature Query: ");
+	print_hex32((uint32_t)caps->npi_status);
+	if (caps->npi_status == 0) {
+		ffa_console_puts("	NPI Interrupt ID: ");
+		print_hex32(caps->npi_intid);
+	}
+
+	ffa_console_puts("[SP] SRI Feature Query: ");
+	print_hex32((uint32_t)caps->sri_status);
+	if (caps->sri_status == 0) {
+		ffa_console_puts("	SRI Interrupt ID: ");
+		print_hex32(caps->sri_intid);
+	}
+
+	ffa_console_puts("[SP] Notification Properties Query: ");
+	print_hex32((uint32_t)caps->notification_properties_status);
+	if (caps->notification_properties_status == 0) {
+		ffa_console_puts("[SP] Notification Properties: ");
+		print_hex32(caps->notification_properties);
+
+		ffa_console_puts(caps->vm_per_vcpu_notifications_supported ?
+				"[SP] VM per-vCPU Notifications: supported\r\n" :
+				"[SP] VM per-vCPU Notifications: not supported\r\n");
+
+		ffa_console_puts(caps->sp_per_vcpu_notifications_supported ?
+				"[SP] SP per-vCPU Notifications: supported\r\n" :
+				"[SP] SP per-vCPU Notifications: not supported\r\n");
+
+		ffa_console_puts("[SP] VM application notification count: ");
+		print_hex32(caps->vm_notification_count);
+		ffa_console_puts("[SP] SP application notification count: ");
+		print_hex32(caps->sp_notification_count);
+	}
 }
 
 static void prepare_msg_wait(struct ffa_regs *regs)
@@ -442,6 +497,7 @@ void sp_main(void)
 {
 	uint16_t my_id = 0;
 	struct ffa_regs regs = {0};
+	struct ffa_notifications_capabilities notification_caps = {0};
 
 	ffa_console_puts("[SP] : [DEBUG]: sp_main() called\r\n");
 
@@ -479,7 +535,30 @@ void sp_main(void)
 		ffa_console_puts("[SP] Unexpected Endpoint ID\n");
 		wait_forever();
 	}
+
+	ret = ffa_notification_capabilities_get(&notification_caps);
+	if (ret) {
+		ffa_console_puts("[SP]: Notification Capability Discovery Failed\r\n");
+		print_hex32((uint32_t)ret);
+		wait_forever();
+	}
+	report_notifications_features(&notification_caps);
+
+	if (notification_caps.npi_status != 0 ||
+		notification_caps.npi_intid == HF_INVALID_INTID) {
+		ffa_console_puts("[SP] NPI Feature unavailable, cannot receive notifications\r\n");
+		wait_forever();
+	}
+	sp_npi_intid = notification_caps.npi_intid;
 	
+	ret = ffa_notification_bind(LINUX_ENDPOINT_ID, my_id, false, LINUX_TO_SP_NOTIF_BIT);
+	if (ret) {
+		ffa_console_puts("[SP] FFA_NOTIFICATION_BIND failed \r\n");
+		print_hex32((uint32_t)ret);
+		wait_forever();
+	}
+	ffa_console_puts("[SP] Bound Linux as sender for global Notification ID: 19\r\n");
+
 	report_all_ffa_functions_check(functions_to_check,
 			ARRAY_SIZE(functions_to_check));
 
