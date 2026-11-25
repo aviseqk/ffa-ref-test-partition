@@ -10,6 +10,7 @@
 /* Generic FF-A function IDs */
 #define FFA_FID_ERROR			UINT32_C(0x84000060)
 #define FFA_FID_SUCCESS			UINT32_C(0x84000061)
+#define FFA_FID_SUCCESS_64		UINT32_C(0xc4000061)
 #define FFA_FID_INTERRUPT		UINT32_C(0x84000062)
 #define FFA_FID_VERSION			UINT32_C(0x84000063)
 #define FFA_FID_FEATURES		UINT32_C(0x84000064)
@@ -97,6 +98,13 @@
 #define FFA_FID_NOTIFICATION_INFO_GET_64 \
 					UINT32_C(0xC4000083)
 
+#define FFA_NOTIFICATION_GET_SPM_FRAMEWORK \
+					(1U << 2)
+#define FFA_NOTIFICATION_RX_BUFFER_FULL \
+					(1U << 0)
+
+#define FFA_NOTIFICATION_GET_HYP_FRAMEWORK \
+					(1U << 3)
 
 /* Miscellaneous FF-A interfaces function IDs */
 #define FFA_FID_CONSOLE_LOG_32		UINT32_C(0x8400008A)
@@ -136,6 +144,15 @@
 #define FFA_LOCAL_ERR_BAD_VERSION       (-1001)
 #define FFA_LOCAL_ERR_BAD_RETURN	(-1002)
 
+
+/* HVC conduit, so paravirtualized interfaces for hafnium/SPMC */
+#define HF_INTERRUPT_GET		UINT32_T(0xff04)
+
+#define HF_NOTIFICATION_PENDING_INTID	UINT32_C(5)
+#define HF_INVALID_INTID		UINT32_MAX
+
+uint32_t hf_interrupt_get(void);
+
 /* FF-A Call Registers for SMC calls
  * for FF-A 1.2 direct msg as it uses x0 - x17
  * */
@@ -144,6 +161,22 @@ struct ffa_regs {
 	uint64_t x[FFA_REG_COUNT];
 };
 
+/* FF-A Indirect Messaging Header 
+ *
+ * as per FF-A, the payload begins at offset 40, just as the header ends,
+ * i.e. the header's size is fixed by firmware specification itself */
+struct ffa_indirect_msg_header {
+	uint32_t flags;
+	uint32_t reserved0;
+	uint32_t offset;
+	uint32_t sender_receiver_id;
+	uint32_t size;
+	uint32_t reserved1;
+	uint8_t uuid[16];
+};
+
+_Static_assert(sizeof(struct ffa_indirect_msg_header) ==  40,
+		"Invalid FF-A Indirect Message Header Size");
 
 /* FF-A SMC Call - C implementation */
 void ffa_smc(struct ffa_regs* regs);
@@ -160,12 +193,35 @@ bool ffa_console_puts(const char *str);
 bool ffa_console_puts_32(const char *str);
 
 int ffa_init(uint32_t requested_version);
+int ffa_init_from_manifest(uint32_t manifest_version);
 
 int ffa_features(uint32_t fid, uint32_t input_properties,
 		uint32_t *props_1, uint32_t *props_2);
 
 bool ffa_function_supported(uint32_t function_id);
 
+// RxTx related operations for Indirect Messaging
 int ffa_rxtx_get_limits(uint32_t *min_size, uint32_t* max_size);
+
+int ffa_rx_release(void);
+
+int ffa_notification_get_spm_framework(
+	uint16_t endpoint_id,
+	uint16_t vcpu_id,
+	uint32_t *bitmap);
+
+int ffa_notification_get_hyp_framework(
+	uint16_t endpoint_id,
+	uint16_t vcpu_id,
+	uint32_t *bitmap);
+
+int ffa_msg_send2(
+	void *tx_buffer,
+	size_t tx_buffer_size,
+	uint16_t sender_id,
+	uint16_t receiver_id,
+	const uint8_t uuid[16],
+	const void *payload,
+	size_t payload_size);
 
 #endif
