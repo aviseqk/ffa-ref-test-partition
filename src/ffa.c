@@ -2,6 +2,9 @@
 
 static uint32_t negotiated_version;
 
+
+void print_hex64(uint64_t value);
+
 /* NOTE: this is a SMC call, but written in C with inline assembly approach,
  * there is also a pure assembly wrapper written for the same purpose, in `src/ffa_smc.S` 
  * which does not have to consider a lot of compiler adjustements about different registers
@@ -162,10 +165,29 @@ int ffa_get_id(uint16_t *id)
 	return 0;
 }
 
+/*
+ * Initialize the local FF-A library using the version
+ * declared in the SP manifest.
+ *
+ * With manifest-configured RX/TX buffers, Hafnium maps
+ * the mailbox before the SP starts executing. Consequently,
+ * runtime FFA_VERSION negotiation can be rejected because
+ * the FF-A framework is already in use.
+ */
+int ffa_init_from_manifest(uint32_t manifest_version)
+{
+    if (FFA_VERSION_MAJOR(manifest_version) != 1)
+        return FFA_LOCAL_ERR_BAD_VERSION;
 
+    negotiated_version = manifest_version;
+
+    return 0;
+}
 
 int ffa_init(uint32_t requested_version)
 {
+
+	ffa_console_puts("[SP]: [DEBUG]: ffa_init() called\r\n");
 	struct ffa_regs regs = {0};
 	
 	if (FFA_VERSION_MAJOR(requested_version) != 1)
@@ -258,4 +280,147 @@ int ffa_rxtx_get_limits(uint32_t *min_size, uint32_t *max_size)
 		*max_size = 0;
 	
 	return 0;
+}
+
+/* FFA_RX_RELEASE implementation 
+ * this call is the SP giving the ownership of its Rx buffer 
+ * back to the SPMC after consuming the incoming message*/
+int ffa_rx_release(void)
+{
+	ffa_console_puts("[SP] :[DEBUG]: ffa_rx_release() called\r\n");
+
+	struct ffa_regs regs = {0};
+
+	regs.x[0] = FFA_FID_RX_RELEASE;
+	
+	// if the SP is a secure instance, x1 is reserved
+	regs.x[1] = 0;
+
+	ffa_smc_call(&regs);
+
+	return ffa_check_success(&regs);
+}
+
+// TODO: update the below comment
+/* get the SPM framework notification bitmap
+ * as the Rx-Buffer-Full Notification is a Framework Notification not an Application Notification, 
+ * hence we want the SPM notification bitmap*/
+int ffa_notification_get_spm_framework(
+	uint16_t endpoint_id,
+	uint16_t vcpu_id,
+	uint32_t *bitmap)
+{
+	ffa_console_puts("[SP] :[DEBUG]: ffa_notification_get_spm_framework() called\r\n");
+
+	struct ffa_regs regs = {0};
+
+	if (!bitmap)
+		return FFA_LOCAL_ERR_BAD_RETURN;
+
+	regs.x[0] = FFA_FID_NOTIFICATION_GET;
+	regs.x[1] = ((uint32_t)vcpu_id << 16) | (uint32_t)endpoint_id;	// for UP, single vCPU SP, vcpu_id is 0
+	regs.x[2] = FFA_NOTIFICATION_GET_SPM_FRAMEWORK;
+
+	ffa_smc_call(&regs);
+
+	int ret = ffa_check_success(&regs);
+	if (ret)
+		return ret;
+
+	/* as per FFA doc, in FFA_SUCCESS encoding of FFA_FID_NOTIFICATION_GET, 
+	 * its' the x6 register bits [31:0] that return the SPM Framework notification bitmap
+	 * basically, the bits set to identify the notifications pending for the receiver 
+	 * endpoint as sent by SPM, here they are set by the SPM and tell about the notifications 
+	 * regarding events in the Secure World i.e. case of our SP */
+	*bitmap = (uint32_t)regs.x[6];
+
+	return 0;
+}
+
+/**/
+int ffa_notification_get_hyp_framework(
+		uint16_t endpoint_id,
+		uint16_t vcpu_id,
+		uint32_t *bitmap)
+{
+	ffa_console_puts("[SP]: [DEBUG]: ffa_notification_get_hyp_framework() called\r\n");
+
+	struct ffa_regs regs = {0};
+
+	if (!bitmap)
+		return FFA_LOCAL_ERR_BAD_RETURN;
+
+	regs.x[0] = FFA_FID_NOTIFICATION_GET;
+	regs.x[1] = ((uint32_t)vcpu_id << 16) | (uint32_t)endpoint_id;
+	regs.x[2] = FFA_NOTIFICATION_GET_HYP_FRAMEWORK;
+
+	ffa_smc_call(&regs);
+
+	int ret = ffa_check_success(&regs);
+	if (ret)
+		return ret;
+
+	/* as per FFA doc, hyp Rx buffer full notification is notification ID 32, i.e. bit0 of x7 */
+	*bitmap = (uint32_t)regs.x[7];
+	return 0;
+}
+
+
+static void ffa_copy_bytes(void *dst,
+                           const void *src,
+                           size_t size)
+{
+	uint8_t *d = dst;
+	const uint8_t *s = src;
+
+	while (size--)
+		*d++ = *s++;
+}
+
+/* FFA_MSG_SEND2 implementation - the SP writing FF-A header and payload into SP's Tx Buffer */
+int ffa_msg_send2(
+	void *tx_buffer,
+	size_t tx_buffer_size,
+	uint16_t sender_id,
+	uint16_t receiver_id,
+	const uint8_t uuid[16],
+	const void *payload,
+	size_t payload_size)
+{
+	ffa_console_puts("[SP] :[DEBUG]: ffa_msg_send2() called\r\n");
+
+	struct ffa_indirect_msg_header *header;
+	struct ffa_regs regs = {0};
+
+	if (!tx_buffer || !uuid || !payload)
+		return FFA_LOCAL_ERR_BAD_RETURN;
+
+	if (tx_buffer_size < sizeof(*header) || payload_size > tx_buffer_size - sizeof(*header))
+		return FFA_LOCAL_ERR_BAD_RETURN;
+	
+	header = tx_buffer;
+
+	header->flags = 0;
+	header->reserved0 = 0;
+	header->offset = sizeof(*header);
+
+	header->sender_receiver_id = 
+		(uint32_t)sender_id << 16 | (uint32_t)receiver_id;
+
+	header->size = (uint32_t)payload_size;
+	header->reserved1 = 0;
+
+	ffa_copy_bytes(header->uuid, uuid, sizeof(header->uuid));
+	ffa_copy_bytes((uint8_t *)tx_buffer + header->offset, payload, payload_size);
+
+	/* making sure the TX buffer writes are visible before transferring control to the SPMC. */
+	asm volatile("dmb ish" ::: "memory");
+
+	regs.x[0] = FFA_FID_MSG_SEND2;
+	regs.x[1] = 0;
+	regs.x[2] = 0;	// msg flags: no delay-SRI request
+	
+	ffa_smc_call(&regs);
+
+	return ffa_check_success(&regs);
 }
