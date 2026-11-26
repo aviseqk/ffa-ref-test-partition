@@ -19,18 +19,7 @@ const uint8_t SP_UUID_BYTES[16] = {
 #define SP_UUID_LO		UINT64_C(0x7a0940e53f7950f2)
 #define SP_UUID_HI		UINT64_C(0x4cbba07dbd8368b9)
 
-/* NPI ID as discovered through FFA_FEATURES at startup. */
-static uint32_t sp_npi_intid = HF_INVALID_INTID;
 
-/* Last Virtual Interrupt handled by the SP */
-volatile uint32_t sp_last_irq_id = HF_INVALID_INTID;
-
-void sp_irq_handler(void)
-{
-	// retrieve and acknowledge this pending virtual interrupt using the 
-	// hafnium's hvc interface `HF_INTERRUPT_GET`
-	sp_last_irq_id = hf_interrupt_get();
-}
 
 /* Application protocol. - for 32 bit Direct Messaging */
 #define REQUEST_MAGIC		UINT32_C(0x4c4e5831) /* LNX1 */
@@ -131,9 +120,7 @@ static void report_all_ffa_functions_check(const struct ffa_function *functions,
 		ffa_console_puts(": NOT supported\n");
 }
 
-#define NOTIF_LINUX_TO_SP_ID		19U
-#define NOTIF_SP_TO_LINUX_ID		20U
-#define LINUX_TO_SP_NOTIF_BIT		(UINT64_C(1) << NOTIF_LINUX_TO_SP_ID)
+
 
 static void report_notifications_features(
 		const struct ffa_notifications_capabilities *caps)
@@ -493,6 +480,147 @@ static void process_indirect_message(uint16_t my_id)
 	ffa_console_puts("[SP]: Indirect Response sent to Linux\r\n");
 }
 
+/* NPI ID as discovered through FFA_FEATURES at startup. */
+static uint32_t sp_npi_intid = HF_INVALID_INTID;
+/* software flag that irq handler uses to let main loop know of pending notifications */
+static volatile uint32_t sp_notification_work_pending;
+
+typedef uint64_t irq_flags_t;
+
+static inline irq_flags_t disable_irq_with_state(void)
+{
+	irq_flags_t flags;
+
+	asm volatile(
+		"mrs %0, daif\n\t"
+		"msr daifset, #2\n\t"
+		: "=r"(flags)
+		:
+		: "memory");
+
+	return flags;
+}
+
+static inline void restore_irq_state(irq_flags_t flags)
+{
+	asm volatile(
+		"msr daif, %0\n\t"
+		"isb\n\t"
+		:
+		: "r"(flags)
+		: "memory");
+}
+
+/* Last Virtual Interrupt handled by the SP */
+//volatile uint32_t sp_last_irq_id = HF_INVALID_INTID;
+
+void sp_irq_handler(void)
+{
+	// retrieve and acknowledge this pending virtual interrupt using the
+	// hafnium's hvc interface `HF_INTERRUPT_GET`
+	uint32_t intid = hf_interrupt_get();
+
+	if (intid == sp_npi_intid) {
+		asm volatile("dmb ishst" ::: "memory");
+		sp_notification_work_pending = 1;
+	}
+}
+
+/* NOTE:
+ * The `sp_notification_work_pending` flag is used by IRQ handler to notify main loop
+ * that a notification work is pending, and the IRQ handler in its runtime, it just sets that flag.
+ * The main loop then reads that flag, and resets it, and then work on the said notification.
+ *
+ * However, there is a race condition where the bottom half of the interrupt handling, this mainloop, where in this function,
+ * when the take_sp_notification_work, is reading the flag, and then resetting that flag as 0, a race might occur.
+ * Another IRQ for notification work might just hit then, and then this bottom half work would end up marking the
+ * flag as 0 for earlier notification and unknowingly ignoring the newly arrived notification indication.
+ *
+ * To deal with this issue, when the `take_sp_notification_work` is acknowledging its notification work
+ * for one notification, it disable the IRQs and then resets the `sp_notification_work_pending` flag so that
+ * no other IRQ could be lost because of this step.
+ *
+ * TL;DR: The 'reading' and 'clearing' step for the said flag is made as one indivisible operation wrt to the IRQ handler */
+static bool take_sp_notification_work(void)
+{
+	irq_flags_t saved_daif;
+	bool pending;
+
+	saved_daif = disable_irq_with_state();
+
+	pending = (sp_notification_work_pending != 0);
+	sp_notification_work_pending = 0;
+
+	restore_irq_state(saved_daif);
+	return pending;
+}
+
+#define NOTIF_LINUX_TO_SP_ID		19U
+#define NOTIF_SP_TO_LINUX_ID		20U
+#define LINUX_TO_SP_NOTIF_BIT		(UINT64_C(1) << NOTIF_LINUX_TO_SP_ID)
+#define SP_TO_LINUX_NOTIF_BIT		(UINT64_C(1) << NOTIF_SP_TO_LINUX_ID)
+
+static void dump_notification_bitmaps(struct ffa_notification_state *pending)
+{
+	ffa_console_puts("[SP]: [DUMP] Notification Bitmaps\r\n");
+	ffa_console_puts("SP Notifications:	");
+	print_hex64(pending->sp_notifications);
+	ffa_console_puts("VM Notifications:	");
+	print_hex64(pending->vm_notifications);
+	ffa_console_puts("SPM Notifications:	");
+	print_hex32(pending->spm_framework_notifications);
+	ffa_console_puts("HYP Notifications:	");
+	print_hex32(pending->hyp_framework_notifications);
+}
+
+/* Function to drain and process the application notification bitmaps.
+ * We do not request framework notification bitmaps here, and as Rx-Buffer-Full
+ * notification is drained and worked on in the indirect-msg path */
+
+/* NOTE: currently this function serves both the notifications processing path as well
+ * as the rebuttal step for a Linux <-> SP two-way notification testing, outsource the
+ * latter part to a different interface later */
+static void process_application_notifications(uint16_t my_id)
+{
+	struct ffa_notification_state pending_notifs = {0};
+	int ret;
+
+	ret = ffa_notification_get(my_id, 0,
+		FFA_NOTIFICATION_GET_FLAG_SP_BITMAP | FFA_NOTIFICATION_GET_FLAG_VM_BITMAP,
+		&pending_notifs);
+	if (ret) {
+		ffa_console_puts("[SP] Application FFA_NOTIFICATION_GET failed: ");
+		print_hex32(ret);
+		return;
+	}
+
+	dump_notification_bitmaps(&pending_notifs);
+
+	if (pending_notifs.vm_notifications & LINUX_TO_SP_NOTIF_BIT) {
+		/* Linux sent the notification to SP i.e. 19 */
+		/* NOTE: Linux must have the notification ID 20 bound to this SP as sender before the following SET call */
+		ffa_console_puts("[SP] Linux sent a notification #19\r\n");
+
+		ret = ffa_notification_set(my_id, LINUX_ENDPOINT_ID, 0, 0, false, SP_TO_LINUX_NOTIF_BIT);
+		if (ret == 0) {
+			ffa_console_puts("[SP] Application notification sent to Linux #20");
+		} else {
+			ffa_console_puts("[SP] FFA_NOTIFICATION_SET to Linux failed: ");
+			print_hex32((uint32_t)ret);
+		}
+	}
+
+	if (pending_notifs.sp_notifications != 0) {
+		ffa_console_puts("[SP] Pending SP-notification bitmap: ");
+		print_hex64(pending_notifs.sp_notifications);
+	}
+
+	if (pending_notifs.vm_notifications & ~LINUX_TO_SP_NOTIF_BIT) {
+		ffa_console_puts("[SP] Other pending VM-notification bitmap (already retrieved): ");
+		print_hex64(pending_notifs.vm_notifications & ~LINUX_TO_SP_NOTIF_BIT);
+	}
+}
+
 void sp_main(void)
 {
 	uint16_t my_id = 0;
@@ -610,8 +738,18 @@ void sp_main(void)
 	prepare_msg_wait(&regs);
 
 	for (;;) {
+		if (take_sp_notification_work()) {
+			asm volatile("dmb ish" ::: "memory");
+			process_application_notifications(my_id);
+		}
 
 		ffa_smc_call(&regs);
+
+		/* INFO: An NPI interrupt might've hit in the time during the above `ffa_smc_call`, so accoaunting for that */
+		if (take_sp_notification_work()) {
+			asm volatile("dmb ish" ::: "memory");
+			process_application_notifications(my_id);
+		}
 
 		switch((uint32_t)regs.x[0]) {
 			case FFA_FID_MSG_SEND_DIRECT_REQ_32:
