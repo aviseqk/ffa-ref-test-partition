@@ -514,13 +514,20 @@ static inline void restore_irq_state(irq_flags_t flags)
 /* Last Virtual Interrupt handled by the SP */
 //volatile uint32_t sp_last_irq_id = HF_INVALID_INTID;
 
+static volatile uint32_t sp_irq_count;
+static volatile uint32_t sp_last_irq_id;
+static volatile uint32_t sp_npi_irq_count;
+
 void sp_irq_handler(void)
 {
 	// retrieve and acknowledge this pending virtual interrupt using the
 	// hafnium's hvc interface `HF_INTERRUPT_GET`
 	uint32_t intid = hf_interrupt_get();
+	sp_irq_count++;
+	sp_last_irq_id = intid;
 
 	if (intid == sp_npi_intid) {
+		sp_npi_irq_count++;
 		asm volatile("dmb ishst" ::: "memory");
 		sp_notification_work_pending = 1;
 	}
@@ -555,10 +562,37 @@ static bool take_sp_notification_work(void)
 	return pending;
 }
 
+#define NOTIF_BIT(id)			(UINT64_C(1) << (id))
+
+/* Linux -> SP Notification IDs */
 #define NOTIF_LINUX_TO_SP_ID		19U
+#define NOTIF_LINUX_REBIND_ID		25U
+
+/* SP -> Linux Notification IDs */
 #define NOTIF_SP_TO_LINUX_ID		20U
-#define LINUX_TO_SP_NOTIF_BIT		(UINT64_C(1) << NOTIF_LINUX_TO_SP_ID)
-#define SP_TO_LINUX_NOTIF_BIT		(UINT64_C(1) << NOTIF_SP_TO_LINUX_ID)
+#define NOTIF_SP_TO_LINUX_MULTI_A_ID	21U
+#define NOTIF_SP_TO_LINUX_MULTI_B_ID	22U
+#define NOTIF_SP_TO_LINUX_REBIND_ACK_ID	23U
+
+/* intentionally unbound notification IDs for negative case testing */
+#define NOTIF_SP_UNBOUND_ID		26U
+
+/* intentionally created invalid sender id for spoofing test */
+#define NOTIF_SPOOFED_SENDER_ID		0x1234U
+
+
+#define LINUX_TO_SP_NOTIF_BIT		NOTIF_BIT(NOTIF_LINUX_TO_SP_ID)
+#define LINUX_REBIND_NOTIF_BIT		NOTIF_BIT(NOTIF_LINUX_REBIND_ID)
+
+#define SP_TO_LINUX_NOTIF_BIT		NOTIF_BIT(NOTIF_SP_TO_LINUX_ID)
+#define SP_TO_LINUX_MULTI_MASK	\
+				(NOTIF_BIT(NOTIF_SP_TO_LINUX_ID) | \
+				 NOTIF_BIT(NOTIF_SP_TO_LINUX_MULTI_A_ID) | \
+				 NOTIF_BIT(NOTIF_SP_TO_LINUX_MULTI_B_ID))
+#define SP_TO_LINUX_REBIND_ACK_NOTIF_BIT \
+				NOTIF_BIT(NOTIF_SP_TO_LINUX_REBIND_ACK_ID)
+
+#define SP_UNBOUND_NOTIF_BIT		NOTIF_BIT(NOTIF_SP_UNBOUND_ID)
 
 static void dump_notification_bitmaps(struct ffa_notification_state *pending)
 {
@@ -573,6 +607,96 @@ static void dump_notification_bitmaps(struct ffa_notification_state *pending)
 	print_hex32(pending->hyp_framework_notifications);
 }
 
+static void report_notification_test(const char *name, bool passed)
+{
+	ffa_console_puts(passed ? "[SP][PASS]" : "[SP][FAIL]");
+	ffa_console_puts(name);
+	ffa_console_puts("\r\n");
+}
+
+
+static bool sp_linux_to_sp_19_bound;
+static bool sp_initial_notif_lifecycle_done;
+
+/* Negative scneario testing for SP -> Linux Notifications
+ * - Unbound Sender Test
+ * - Illegal Spoofed Sender ID test */
+static void test_notification_authorization(uint16_t my_id)
+{
+	int ret;
+
+	ret = ffa_notification_set(my_id, LINUX_ENDPOINT_ID, false, 0, false, SP_UNBOUND_NOTIF_BIT);
+
+	report_notification_test("SET to unbound Linux notification ID 26 rejected", ret != 0);
+
+	if (ret) {
+		ffa_console_puts("[SP] Unbound ID 26 error: ");
+		print_hex32((uint32_t)ret);
+	} else {
+		ffa_console_puts("[SP] ERROR: unbound ID 26 was accepted\r\n");
+	}
+
+	// trying to set an already bound notification i.e. ID 20 with spoofed illegal sender ID
+	ret = ffa_notification_set(NOTIF_SPOOFED_SENDER_ID, LINUX_ENDPOINT_ID, false, 0, false, SP_TO_LINUX_NOTIF_BIT);
+
+	report_notification_test("Spoofed sender rejected with INVALID PARAMETERS", ret == FFA_RET_INVALID_PARAMETERS);
+
+	if (ret) {
+		ffa_console_puts("[SP] Spoofed sender SET error: ");
+		print_hex32((uint32_t)ret);
+	} else {
+		ffa_console_puts("[SP] ERROR: spoofed sender ID was accepted\r\n");
+	}
+}
+
+/* This function tests the multiple notification IDs and repeated SET calls,
+ * as expected by the SP as a response move after first time ID 19 is set by Linux
+ *
+ * The SP first sets the ID 20, 21 and 22 in one call, and does so with `delay_sri` flag as true
+ * This is so that the SRI for the these notifications do not hit the normal world, and let the
+ * Linux handle these notifications before the SP has had a chance to do the repeated SET
+ * [This is the way we have set the test up]
+ * */
+static void send_linux_notification_test_response(uint16_t my_id)
+{
+	int ret;
+
+	ret = ffa_notification_set(my_id, LINUX_ENDPOINT_ID, false, 0, true, SP_TO_LINUX_MULTI_MASK);
+
+	report_notification_test("SET IDs 20, 21 and 22", ret == 0);
+
+	if (ret) {
+		ffa_console_puts("[SP] Multi-ID SET failed: ");
+		print_hex32((uint32_t)ret);
+		return;
+	}
+
+	// resend the SET for ID 20 twice more, the aim to check is that additional notificaiton events must not be created
+	for (int i = 0; i < 2; i++) {
+		ret = ffa_notification_set(my_id, LINUX_ENDPOINT_ID, false, 0, true, SP_TO_LINUX_NOTIF_BIT);
+
+		if (ret) {
+			ffa_console_puts("[SP] Repeated SET for ID 20 failed: ");
+			print_hex32((uint32_t)ret);
+			return;
+		}
+	}
+
+	report_notification_test("Repeated SET of pending ID 20 accepted", true);
+
+	// set the already pending ID 20 once again with delay_sri false, so that the deferred SRI is released and
+	// thus Linux can receive these notifications, otherwise there was a bug wherein Linux was timing out waiting on these.
+	/*
+	ret = ffa_notification_set(my_id, LINUX_ENDPOINT_ID, false, 0, false, SP_TO_LINUX_NOTIF_BIT);
+	report_notification_test("Release deferred SRI for IDs 20,21,22 by setting ID 20 with no SRI", ret == 0);
+
+	if (ret) {
+		ffa_console_puts("[SP] SRI Release SET for ID 20 failed: ");
+		print_hex32((uint32_t)ret);
+	}
+	*/
+}
+
 /* Function to drain and process the application notification bitmaps.
  * We do not request framework notification bitmaps here, and as Rx-Buffer-Full
  * notification is drained and worked on in the indirect-msg path */
@@ -582,42 +706,132 @@ static void dump_notification_bitmaps(struct ffa_notification_state *pending)
  * latter part to a different interface later */
 static void process_application_notifications(uint16_t my_id)
 {
+	ffa_console_puts("[SP] process_application_notifications() called\r\n");
 	struct ffa_notification_state pending_notifs = {0};
 	int ret;
 
+	/* controlled test sequence, where before we do GET, we attempt to unbind
+	 * the ID 19 as it is still pending since it is the first bind Linux does
+	 * FFA_DENIED should be the response of the unbind call*/
+	if (!sp_initial_notif_lifecycle_done) {
+		ret = ffa_notification_unbind(LINUX_ENDPOINT_ID, my_id, LINUX_TO_SP_NOTIF_BIT);
+
+		report_notification_test("UNBIND ID 19 while pending is denied", ret == FFA_RET_DENIED);
+
+		if (ret != FFA_RET_DENIED) {
+			ffa_console_puts("[SP] Unexpected pending UNBIND result: ");
+			print_hex32((uint32_t)ret);
+
+			// if FFA call was not denied, but somehow accepted, the recovery case
+			// of rebinding the ID 19 as it is crucial to later tests
+			if (ret == 0) {
+				int bind_ret = ffa_notification_bind(LINUX_ENDPOINT_ID, my_id, 0, LINUX_TO_SP_NOTIF_BIT);
+
+				if (bind_ret == 0)
+					sp_linux_to_sp_19_bound = true;
+			}
+		}
+
+	}
+
+	/* Now, we can retrieve the pending notifications, VM bits */
 	ret = ffa_notification_get(my_id, 0,
 		FFA_NOTIFICATION_GET_FLAG_SP_BITMAP | FFA_NOTIFICATION_GET_FLAG_VM_BITMAP,
 		&pending_notifs);
 	if (ret) {
 		ffa_console_puts("[SP] Application FFA_NOTIFICATION_GET failed: ");
-		print_hex32(ret);
+		print_hex32((uint32_t)ret);
 		return;
 	}
-
 	dump_notification_bitmaps(&pending_notifs);
 
+	/* Notification ID 19 : Linux -> SP call */
 	if (pending_notifs.vm_notifications & LINUX_TO_SP_NOTIF_BIT) {
-		/* Linux sent the notification to SP i.e. 19 */
-		/* NOTE: Linux must have the notification ID 20 bound to this SP as sender before the following SET call */
-		ffa_console_puts("[SP] Linux sent a notification #19\r\n");
+		ffa_console_puts("[SP] Linux application notification ID 19 received\n");
 
-		ret = ffa_notification_set(my_id, LINUX_ENDPOINT_ID, 0, 0, false, SP_TO_LINUX_NOTIF_BIT);
-		if (ret == 0) {
-			ffa_console_puts("[SP] Application notification sent to Linux #20");
+		if (!sp_initial_notif_lifecycle_done) {
+			struct ffa_notification_state after_get = {0};
+
+			report_notification_test("GET observed pending VM bit 19", true);
+
+			/* reobserving GET after clearing the notification - bit 19 must not be returned */
+			ret = ffa_notification_get(my_id, 0,
+				FFA_NOTIFICATION_GET_FLAG_SP_BITMAP | FFA_NOTIFICATION_GET_FLAG_VM_BITMAP,
+				&after_get);
+			if (ret == 0) {
+				report_notification_test("GET cleared bit 19, not observed post GET read",
+						(after_get.vm_notifications & LINUX_TO_SP_NOTIF_BIT) == 0);
+			} else {
+				report_notification_test("Second GET completed, observed consumed bit 19 again", false);
+
+				ffa_console_puts("[SP] Second GET error: ");
+				print_hex32((uint32_t)ret);
+			}
+
+
+			/* pending VM bit 19 has been retrieved, UNBIND to it should succeed */
+			ret = ffa_notification_unbind(LINUX_ENDPOINT_ID, my_id, LINUX_TO_SP_NOTIF_BIT);
+
+			report_notification_test("UNBIND ID 19 after GET", ret == 0);
+
+			if (ret == 0)
+				sp_linux_to_sp_19_bound = false;
+			else {
+				ffa_console_puts("[SP] Post-GET UNBIND error: ");
+				print_hex32((uint32_t)ret);
+			}
+
+
+			/* negative case testing done here
+			 * both, the unbound receiver notification and the forged sender test */
+			test_notification_authorization(my_id);
+
+			sp_initial_notif_lifecycle_done = true;
+		}
+
+		/* Linux expects IDs 20/21/22 and repeated SET of ID 20 as part for further testing */
+		send_linux_notification_test_response(my_id);
+	}
+
+
+	/* Notification ID 25: Linux -> SP : the rebind control notification */
+	if (pending_notifs.vm_notifications & LINUX_REBIND_NOTIF_BIT) {
+		ffa_console_puts("[SP] Linux rebind notification ID 25 received\n");
+
+		// as REBIND requires ID 19 to be unbound at this time
+		if (sp_linux_to_sp_19_bound) {
+			report_notification_test("ID 19 already bound at time of rebind request", false);
 		} else {
-			ffa_console_puts("[SP] FFA_NOTIFICATION_SET to Linux failed: ");
+			ret = ffa_notification_bind(LINUX_ENDPOINT_ID, my_id, false, LINUX_TO_SP_NOTIF_BIT);
+
+			report_notification_test("BIND ID 19 again after UNBIND", ret == 0);
+			if (ret == 0)
+				sp_linux_to_sp_19_bound = true;
+			else {
+				ffa_console_puts("[SP] REBIND ID 19 error: ");
+				print_hex32((uint32_t)ret);
+			}
+		}
+
+		ret = ffa_notification_set(my_id, LINUX_ENDPOINT_ID, false, 0, true, SP_TO_LINUX_REBIND_ACK_NOTIF_BIT);
+
+		report_notification_test("SET Rebind acknowledgment ID 23", ret == 0);
+
+		if (ret) {
+			ffa_console_puts("[SP] Rebind acknowledgment SET Error: ");
 			print_hex32((uint32_t)ret);
 		}
 	}
+
 
 	if (pending_notifs.sp_notifications != 0) {
 		ffa_console_puts("[SP] Pending SP-notification bitmap: ");
 		print_hex64(pending_notifs.sp_notifications);
 	}
 
-	if (pending_notifs.vm_notifications & ~LINUX_TO_SP_NOTIF_BIT) {
+	if (pending_notifs.vm_notifications & ~(LINUX_TO_SP_NOTIF_BIT | LINUX_REBIND_NOTIF_BIT)) {
 		ffa_console_puts("[SP] Other pending VM-notification bitmap (already retrieved): ");
-		print_hex64(pending_notifs.vm_notifications & ~LINUX_TO_SP_NOTIF_BIT);
+		print_hex64(pending_notifs.vm_notifications & ~(LINUX_TO_SP_NOTIF_BIT | LINUX_REBIND_NOTIF_BIT));
 	}
 }
 
@@ -679,13 +893,15 @@ void sp_main(void)
 	}
 	sp_npi_intid = notification_caps.npi_intid;
 	
-	ret = ffa_notification_bind(LINUX_ENDPOINT_ID, my_id, false, LINUX_TO_SP_NOTIF_BIT);
+	ret = ffa_notification_bind(LINUX_ENDPOINT_ID, my_id, false,
+			LINUX_TO_SP_NOTIF_BIT | LINUX_REBIND_NOTIF_BIT);
 	if (ret) {
 		ffa_console_puts("[SP] FFA_NOTIFICATION_BIND failed \r\n");
 		print_hex32((uint32_t)ret);
 		wait_forever();
 	}
-	ffa_console_puts("[SP] Bound Linux as sender for global Notification ID: 19\r\n");
+	ffa_console_puts("[SP] Bound Linux as sender for global Notification ID: 19 and 25\r\n");
+	sp_linux_to_sp_19_bound = true;
 
 	report_all_ffa_functions_check(functions_to_check,
 			ARRAY_SIZE(functions_to_check));
@@ -745,6 +961,15 @@ void sp_main(void)
 
 		ffa_smc_call(&regs);
 
+		ffa_console_puts("[SP IRQ DEBUG] total IRQ count: ");
+		print_hex32(sp_irq_count);
+
+		ffa_console_puts("[SP IRQ DEBUG] last IRQ ID: ");
+		print_hex32(sp_last_irq_id);
+
+		ffa_console_puts("[SP IRQ DEBUG] NPI IRQ count: ");
+		print_hex32(sp_npi_irq_count);
+
 		/* INFO: An NPI interrupt might've hit in the time during the above `ffa_smc_call`, so accoaunting for that */
 		if (take_sp_notification_work()) {
 			asm volatile("dmb ish" ::: "memory");
@@ -794,7 +1019,7 @@ void sp_main(void)
 				 * */
 
 				ffa_console_puts("[SP]: FFA_INTERRUPT received\r\n");
-				break;
+				continue;
 
 			default:
 				ffa_console_puts("[SP] Unexpected FF-A return\n");
