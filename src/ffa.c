@@ -246,6 +246,165 @@ bool ffa_function_supported(uint32_t function_id)
 	return ffa_features(function_id, 0, NULL, NULL) == 0;
 }
 
+int ffa_notification_capabilities_get(
+		struct ffa_notifications_capabilities *caps)
+{
+	uint32_t properties = 0;
+	if (!caps)
+		return FFA_LOCAL_ERR_BAD_RETURN;
+
+	*caps = (struct ffa_notifications_capabilities){0};
+
+	caps->npi_intid = HF_INVALID_INTID;
+	caps->sri_intid = HF_INVALID_INTID;
+
+	caps->bind_status = ffa_features(
+		FFA_FID_NOTIFICATION_BIND,
+		0, NULL, NULL);
+
+	caps->unbind_status = ffa_features(
+		FFA_FID_NOTIFICATION_UNBIND,
+		0, NULL, NULL);
+	caps->set_status = ffa_features(
+		FFA_FID_NOTIFICATION_SET,
+		0, NULL, NULL);
+	caps->get_status = ffa_features(
+		FFA_FID_NOTIFICATION_GET,
+		0, NULL, NULL);
+
+	caps->npi_status = ffa_features(
+		FFA_FEATURE_NOTIFICATION_PENDING_INTERRUPT,
+		0, &caps->npi_intid, NULL);
+
+	caps->sri_status = ffa_features(
+		FFA_FEATURE_SCHEDULE_RECEIVER_INTERRUPT,
+		0, &caps->sri_intid, NULL);
+
+	/* NOTIFICATION_FEATURES call in FFA_FEATURES */
+	caps->notification_properties_status = ffa_features(FFA_FEATURE_NOTIFICATION_FEATURES,
+			0, &properties, NULL);
+
+	if (caps->notification_properties_status == 0) {
+		caps->notification_properties = properties;
+		caps->vm_per_vcpu_notifications_supported =
+			(properties & FFA_FEATURE_VM_PER_VCPU_NOTIFICATIONS_UNSUPPORTED) == 0;
+		caps->sp_per_vcpu_notifications_supported =
+			(properties & FFA_FEATURE_SP_PER_VCPU_NOTIFICATIONS_UNSUPPORTED) == 0;
+		caps->vm_notification_count =
+			(properties & FFA_FEATURE_NOTIFICATIONS_VM_COUNT_MASK) + FFA_FEATURE_NOTIFICATIONS_BASE_COUNT;
+		caps->sp_notification_count =
+			(properties & FFA_FEATURE_NOTIFICATIONS_SP_COUNT_MASK) + FFA_FEATURE_NOTIFICATIONS_BASE_COUNT;
+	}
+	return 0;
+}
+
+int ffa_notification_bind(uint16_t sender_id, uint16_t receiver_id,
+		bool per_vcpu, uint64_t bitmap)
+{
+	struct ffa_regs regs = {0};
+
+	if (!negotiated_version)
+		return FFA_LOCAL_ERR_NOT_INITIALIZED;
+	if (bitmap == 0)
+		return FFA_LOCAL_ERR_BAD_RETURN;
+
+	regs.x[0] = FFA_FID_NOTIFICATION_BIND;
+	regs.x[1] = ((uint32_t)sender_id << 16) | (uint32_t)receiver_id;
+	regs.x[2] = per_vcpu ? FFA_NOTIFICATION_FLAG_PER_VCPU : 0;
+	regs.x[3] = (uint32_t)bitmap;
+	regs.x[4] = (uint32_t)(bitmap >> 32);
+
+	ffa_smc_call(&regs);
+
+	return ffa_check_success(&regs);
+}
+
+int ffa_notification_unbind(uint16_t sender_id, uint16_t receiver_id, uint64_t bitmap)
+{
+	struct ffa_regs regs = {0};
+
+	if (!negotiated_version)
+		return FFA_LOCAL_ERR_NOT_INITIALIZED;
+	if (bitmap == 0)
+		return FFA_LOCAL_ERR_BAD_RETURN;
+
+	regs.x[0] = FFA_FID_NOTIFICATION_UNBIND;
+	regs.x[1] = ((uint32_t)sender_id << 16) | (uint32_t)receiver_id;
+	regs.x[2] = 0;
+	regs.x[3] = (uint32_t)bitmap;
+	regs.x[4] = (uint32_t)(bitmap >> 32);
+
+	ffa_smc_call(&regs);
+
+	return ffa_check_success(&regs);
+}
+
+int ffa_notification_set(uint16_t sender_id, uint16_t receiver_id,
+		bool per_vcpu, uint16_t receiver_vcpu_id,
+		bool delay_sri, uint64_t bitmap)
+{
+	struct ffa_regs regs = {0};
+	uint32_t flags = 0;
+
+	if (!negotiated_version)
+		return FFA_LOCAL_ERR_NOT_INITIALIZED;
+	if (bitmap == 0)
+		return FFA_LOCAL_ERR_BAD_RETURN;
+
+	if (per_vcpu) {
+		flags |= FFA_NOTIFICATION_FLAG_PER_VCPU;
+		flags |= (uint32_t)receiver_vcpu_id << 16;
+	}
+
+	if (delay_sri)
+		flags |= FFA_NOTIFICATION_FLAG_DELAY_SCHED_RECV_INTERRUPT;
+
+	regs.x[0] = FFA_FID_NOTIFICATION_SET;
+	regs.x[1] = ((uint32_t)sender_id << 16) | (uint32_t)receiver_id;
+	regs.x[2] = flags;
+	regs.x[3] = (uint32_t)bitmap;
+	regs.x[4] = (uint32_t)(bitmap >> 32);
+
+	ffa_smc_call(&regs);
+
+	return ffa_check_success(&regs);
+}
+
+int ffa_notification_get(uint16_t receiver_id, uint16_t receiver_vcpu_id,
+		uint32_t flags, struct ffa_notification_state *state)
+{
+	struct ffa_regs regs = {0};
+	int ret;
+
+	if (!negotiated_version)
+		return FFA_LOCAL_ERR_NOT_INITIALIZED;
+	if (!state)
+		return FFA_LOCAL_ERR_BAD_RETURN;
+
+	if ((flags & ~(0x0f)) != 0)
+		return FFA_LOCAL_ERR_BAD_RETURN;
+
+	*state = (struct ffa_notification_state){0};
+	regs.x[0] = FFA_FID_NOTIFICATION_GET;
+	regs.x[1] = ((uint32_t)receiver_vcpu_id << 16) | receiver_id;
+	regs.x[2] = flags;
+
+	ffa_smc_call(&regs);
+	ret = ffa_check_success(&regs);
+	if (ret)
+		return ret;
+
+	// FFA_NOTIFICATION_GET returns 4 notification bitmaps in 6 32-bit bitmap words
+	state->sp_notifications = (uint64_t)(uint32_t)regs.x[2] |
+		((uint64_t)(uint32_t)regs.x[3] << 32);
+	state->vm_notifications = (uint64_t)(uint32_t)regs.x[4] |
+		((uint64_t)(uint32_t)regs.x[5] << 32);
+	state->spm_framework_notifications = (uint32_t)regs.x[6];
+	state->hyp_framework_notifications = (uint32_t)regs.x[7];
+
+	return 0;
+}
+
 int ffa_rxtx_get_limits(uint32_t *min_size, uint32_t *max_size)
 {
 	int ret;

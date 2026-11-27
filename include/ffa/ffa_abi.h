@@ -106,6 +106,41 @@
 #define FFA_NOTIFICATION_GET_HYP_FRAMEWORK \
 					(1U << 3)
 
+/* FFA_NOTIFICATION_GET input flags */
+#define FFA_NOTIFICATION_GET_FLAG_SP_BITMAP	(1U << 0)
+#define FFA_NOTIFICATION_GET_FLAG_VM_BITMAP	(1U << 1)
+#define FFA_NOTIFICATION_GET_FLAG_SPM_BITMAP	(1U << 2)
+#define FFA_NOTIFICATION_GET_FLAG_HYP_BITMAP	(1U << 3)
+
+/* FFA_FEATURES feature IDs */
+#define FFA_FEATURE_NOTIFICATION_PENDING_INTERRUPT \
+					UINT32_C(0x1)
+#define FFA_FEATURE_SCHEDULE_RECEIVER_INTERRUPT \
+					UINT32_C(0x2)
+#define FFA_FEATURE_MANAGED_EXIT_INTERRUPT \
+					UINT32_C(0x3)
+#define FFA_FEATURE_NOTIFICATION_FEATURES \
+					UINT32_C(0x4)
+
+#define FFA_FEATURE_VM_PER_VCPU_NOTIFICATIONS_UNSUPPORTED \
+					(1U << 0)
+#define FFA_FEATURE_SP_PER_VCPU_NOTIFICATIONS_UNSUPPORTED \
+					(1U << 1)
+#define FFA_FEATURE_NOTIFICATIONS_VM_COUNT_SHIFT \
+					2U
+#define FFA_FEATURE_NOTIFICATIONS_SP_COUNT_SHIFT \
+					11U
+#define FFA_FEATURE_NOTIFICATIONS_VM_COUNT_MASK \
+					UINT32_C(0x1ff) << FFA_FEATURE_NOTIFICATIONS_VM_COUNT_SHIFT
+#define FFA_FEATURE_NOTIFICATIONS_SP_COUNT_MASK \
+					UINT32_C(0x1ff) << FFA_FEATURE_NOTIFICATIONS_SP_COUNT_SHIFT
+#define FFA_FEATURE_NOTIFICATIONS_BASE_COUNT \
+					64U
+
+/*#define FFA_FEATURE_NOTIFICATIONS_VM_COUNT(props) \
+	(props & (UINT32_C(0x1ff) << 2U))
+*/
+
 /* Miscellaneous FF-A interfaces function IDs */
 #define FFA_FID_CONSOLE_LOG_32		UINT32_C(0x8400008A)
 #define FFA_FID_CONSOLE_LOG_64		UINT32_C(0xC400008A)
@@ -151,6 +186,10 @@
 #define HF_NOTIFICATION_PENDING_INTID	UINT32_C(5)
 #define HF_INVALID_INTID		UINT32_MAX
 
+#define FFA_NOTIFICATION_FLAG_PER_VCPU  (1U << 0)
+#define FFA_NOTIFICATION_FLAG_DELAY_SCHED_RECV_INTERRUPT \
+					(1U << 1)
+
 uint32_t hf_interrupt_get(void);
 
 /* FF-A Call Registers for SMC calls
@@ -177,6 +216,30 @@ struct ffa_indirect_msg_header {
 
 _Static_assert(sizeof(struct ffa_indirect_msg_header) ==  40,
 		"Invalid FF-A Indirect Message Header Size");
+
+struct ffa_notifications_capabilities {
+	int bind_status;
+	int unbind_status;
+	int get_status;
+	int set_status;
+	int sri_status;
+	int npi_status;
+	uint32_t npi_intid;
+	uint32_t sri_intid;
+	int notification_properties_status;
+	uint32_t notification_properties;
+	bool vm_per_vcpu_notifications_supported;
+	bool sp_per_vcpu_notifications_supported;
+	uint16_t vm_notification_count;
+	uint16_t sp_notification_count;
+};
+
+struct ffa_notification_state {
+	uint64_t sp_notifications;
+	uint64_t vm_notifications;
+	uint32_t spm_framework_notifications;
+	uint32_t hyp_framework_notifications;
+};
 
 /* FF-A SMC Call - C implementation */
 void ffa_smc(struct ffa_regs* regs);
@@ -223,5 +286,21 @@ int ffa_msg_send2(
 	const uint8_t uuid[16],
 	const void *payload,
 	size_t payload_size);
+
+int ffa_notification_capabilities_get(
+		struct ffa_notifications_capabilities *caps);
+
+int ffa_notification_bind(uint16_t sender_id, uint16_t receiver_id,
+		bool per_vcpu, uint64_t bitmap);
+
+int ffa_notification_unbind(uint16_t sender_id, uint16_t receiver_id,
+		uint64_t bitmap);
+
+int ffa_notification_set(uint16_t sender_id, uint16_t receiver_id,
+		bool per_vcpu, uint16_t receiver_vcpu_id,
+		bool delay_sri, uint64_t bitmap);
+
+int ffa_notification_get(uint16_t receiver_id, uint16_t receiver_vcpu_id,
+		uint32_t flags, struct ffa_notification_state *state);
 
 #endif
